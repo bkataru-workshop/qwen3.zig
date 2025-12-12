@@ -107,3 +107,18 @@ const RunState = struct {
         allocator.free(self.value_cache);
     }
 };
+
+const Transformer = struct {
+    config: *Config, // the hyperparameters of the architecture (the blueprint)
+    weights: *TransformerWeights, // the weights of the model
+    state: *RunState, // buffers for the "wave" of activations in the forward pass
+    fd: std.posix.fd_t, // file descriptor for memory mapping
+    data: []const f32, // memory mapped data pointer
+    file_size: usize, // size of the checkpoint file in bytes
+
+    // pub fn mmap(self: Transformer)
+};
+
+pub fn main() void {
+    std.debug.print("hello", .{});
+}
