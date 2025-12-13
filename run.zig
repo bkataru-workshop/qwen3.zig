@@ -249,6 +249,17 @@ const TransformerWeights = struct {
         offset += config.dim;
         const token_embedding_table = float_data[offset .. offset + config.vocab_size * config.dim];
         offset += config.vocab_size * config.dim;
+        const wk = float_data[offset .. offset + config.dim * (config.n_kv_heads * config.head_dim)];
+        offset += config.dim * (config.n_kv_heads * config.head_dim);
+        const wk_norm = float_data[offset .. offset + config.head_dim];
+        offset += config.head_dim;
+        const rms_att_weight = float_data[offset .. offset + config.dim];
+        offset += config.dim;
+        const wo = float_data[offset .. offset + (config.n_heads * config.head_dim) * config.dim];
+        offset += (config.n_heads * config.head_dim) * config.dim;
+        const wq = float_data[offset .. offset + config.dim * (config.n_heads * config.head_dim)];
+        offset += config.dim * (config.n_heads * config.head_dim);
+        const wq_norm = float_data[offset .. offset + config.head_dim];
     }
 
     fn bytesAsFloats(data: []const u8) ![]const f32 {
