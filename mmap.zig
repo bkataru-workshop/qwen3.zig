@@ -38,7 +38,15 @@ pub const MappedFile = struct {
             .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly => {
                 return initPosix(path);
             },
+            .windows => {
+                return initWindows(path);
+            },
+            else => @compileError("Unsupported OS for memory mapping. Supported: Linux, macOS, FreeBSD, NetBSD, OpenBSD, DragonflyBSD, Windows"),
         }
+    }
+
+    pub fn initZ(path: [*:0]const u8) MmapError!MappedFile {
+        return init(std.mem.sliceTo(path, 0));
     }
 
     fn initPosix(path: []const u8) MmapError!MappedFile {
