@@ -260,6 +260,34 @@ const TransformerWeights = struct {
         const wq = float_data[offset .. offset + config.dim * (config.n_heads * config.head_dim)];
         offset += config.dim * (config.n_heads * config.head_dim);
         const wq_norm = float_data[offset .. offset + config.head_dim];
+        offset += config.head_dim;
+        const wv = float_data[offset .. offset + config.dim * (config.n_kv_heads * config.head_dim)];
+        offset += config.dim * (config.n_kv_heads * config.head_dim);
+        const w2 = float_data[offset .. offset + config.hidden_dim * config.dim];
+        offset += config.hidden_dim * config.dim;
+        const w3 = float_data[offset .. offset + config.dim * config.hidden_dim];
+        offset += config.dim * config.hidden_dim;
+        const rms_ffn_weight = float_data[offset .. offset + config.dim];
+        offset += config.dim;
+        const w1 = float_data[offset .. offset + config.dim * config.hidden_dim];
+        offset += config.dim * config.hidden_dim;
+
+        return .{
+            .wcls = wcls,
+            .rms_final_weight = rms_final_weight,
+            .token_embedding_table = token_embedding_table,
+            .wk = wk,
+            .wk_norm = wk_norm,
+            .rms_att_weight = rms_att_weight,
+            .wo = wo,
+            .wq = wq,
+            .wq_norm = wq_norm,
+            .wv = wv,
+            .w2 = w2,
+            .w3 = w3,
+            .rms_ffn_weight = rms_ffn_weight,
+            .w1 = w1,
+        };
     }
 
     fn bytesAsFloats(data: []const u8) ![]const f32 {
@@ -302,25 +330,25 @@ const RunState = struct {
     key_cache: []f32, // (layer, seq_len, dim)
     value_cache: []f32, // (layer, seq_len, dim)
 
-    pub fn malloc(allocator: std.mem.Allocator, p: Config) !RunState {
-        const att_head_dim = p.n_heads * p.head_dim;
-        const kv_dim = p.n_kv_heads * p.head_dim; // 1024
+    pub fn malloc(allocator: std.mem.Allocator, config: Config) !RunState {
+        const att_head_dim = config.n_heads * config.head_dim;
+        const kv_dim = config.n_kv_heads * config.head_dim; // 1024
 
         return .{
             .allocator = allocator,
-            .x = try numCalloc(f32, allocator, p.dim),
-            .xb = try numCalloc(f32, allocator, p.dim),
-            .xb2 = try numCalloc(f32, allocator, p.dim),
+            .x = try numCalloc(f32, allocator, config.dim),
+            .xb = try numCalloc(f32, allocator, config.dim),
+            .xb2 = try numCalloc(f32, allocator, config.dim),
             .xb3 = try numCalloc(f32, allocator, att_head_dim),
-            .hb = try numCalloc(f32, allocator, p.hidden_dim),
-            .hb2 = try numCalloc(f32, allocator, p.hidden_dim),
+            .hb = try numCalloc(f32, allocator, config.hidden_dim),
+            .hb2 = try numCalloc(f32, allocator, config.hidden_dim),
             .q = try numCalloc(f32, allocator, att_head_dim),
             .k = try numCalloc(f32, allocator, kv_dim),
             .v = try numCalloc(f32, allocator, kv_dim),
-            .att = try numCalloc(f32, allocator, p.n_heads * p.seq_len),
-            .logits = try numCalloc(f32, allocator, p.vocab_size),
-            .key_cache = try numCalloc(f32, allocator, p.n_layers * p.seq_len * kv_dim),
-            .value_cache = try numCalloc(f32, allocator, p.n_layers * p.seq_len * kv_dim),
+            .att = try numCalloc(f32, allocator, config.n_heads * config.seq_len),
+            .logits = try numCalloc(f32, allocator, config.vocab_size),
+            .key_cache = try numCalloc(f32, allocator, config.n_layers * config.seq_len * kv_dim),
+            .value_cache = try numCalloc(f32, allocator, config.n_layers * config.seq_len * kv_dim),
         };
     }
 
@@ -344,16 +372,46 @@ const RunState = struct {
 };
 
 const Transformer = struct {
+    allocator: std.mem.Allocator,
     config: Config, // the hyperparameters of the architecture (the blueprint)
     weights: TransformerWeights, // the weights of the model
     state: RunState, // buffers for the "wave" of activations in the forward pass
     mmap: MappedFile, // cross-platform, memory mapped file abstraction
 
     // read GGUF
-    pub fn read_checkpoint(
+    fn readCheckpoint(
+        allocator: std.mem.Allocator,
         checkpoint_path: []const u8,
-        config: *Config,
-    ) !Transformer {}
+        config: Config,
+    ) !Transformer {
+        const mmap = try MappedFile.init(checkpoint_path);
+        const header_offset = 5951648;
+
+        std.log.info("file size is {d}", .{mmap.len()});
+
+        const weights = try TransformerWeights.mmap(mmap.slice(), config, header_offset);
+        const state = try RunState.malloc(allocator, config);
+
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .weights = weights,
+            .state = state,
+            .mmap = mmap,
+        };
+    }
+
+    pub fn build(allocator: std.mem.Allocator, checkpoint_path: []const u8, config: Config) !Transformer {
+        return readCheckpoint(allocator, checkpoint_path, config) catch |err| {
+            std.log.err("Error building Transformer: {}", .{err});
+            return err;
+        };
+    }
+
+    pub fn free(self: *Transformer) void {
+        self.state.free();
+        self.mmap.deinit(); // unmaps automatically
+    }
 };
 
 pub fn main() void {
