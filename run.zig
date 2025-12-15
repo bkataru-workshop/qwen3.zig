@@ -207,6 +207,7 @@ pub const MappedFile = struct {
 // ----------------------------------------------------------------------------
 // Transformer model
 const Config = struct {
+    allocator: std.mem.Allocator,
     dim: usize, // transformer dimension
     hidden_dim: usize, // for ffn layers
     n_layers: usize, // number of layers
@@ -215,6 +216,86 @@ const Config = struct {
     vocab_size: usize, // vocabulary size
     seq_len: usize, // max sequence length
     head_dim: usize, // attention dimension
+
+    // load the GGUF config file
+    pub fn load(allocator: std.mem.Allocator, filename: ?[]const u8) !Config {
+        var file = try std.fs.cwd().openFile(filename orelse "header.txt", .{});
+        defer file.close();
+
+        var buf: [4096]u8 = undefined;
+        var file_reader = file.reader(&buf);
+        const r = &file_reader.interface;
+
+        var config = std.StringHashMap(usize).init(allocator);
+        defer config.deinit();
+
+        while (r.takeDelimiterExclusive('\n')) |line| {
+            if (r.seek < r.end) r.toss(1);
+
+            const cleaned = if (line.len != 0 and line[line.len - 1] == '\r')
+                line[0 .. line.len - 1]
+            else
+                line;
+
+            std.debug.print("line = {s}\n", .{cleaned});
+
+            if (std.mem.indexOfScalar(u8, cleaned, '=') == null) continue;
+
+            var parts = std.mem.splitScalar(u8, cleaned, '=');
+            const key = parts.first();
+            const value = parts.rest();
+
+            if (key.len == 0 or value.len == 0) continue;
+
+            if (std.mem.eql(u8, key, "QWEN3_EMBEDDING_LENGTH")) {
+                try config.put("dim", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_FEED_FORWARD_LENGTH")) {
+                try config.put("hidden_dim", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_BLOCK_COUNT")) {
+                try config.put("n_layers", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_ATTENTION_HEAD_COUNT")) {
+                try config.put("n_heads", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_ATTENTION_HEAD_COUNT_KV")) {
+                try config.put("n_kv_heads", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_CONTEXT_LENGTH")) {
+                try config.put("seq_len", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "QWEN3_ATTENTION_KEY_LENGTH")) {
+                try config.put("head_dim", try std.fmt.parseInt(usize, value, 10));
+            } else if (std.mem.eql(u8, key, "TOKENIZER_GGML_TOKENS")) {
+                const ARRAY_LENGTH_KEY = "ARRAY_LENGTH=";
+
+                if (std.mem.indexOf(u8, value, ARRAY_LENGTH_KEY)) |needle| {
+                    const start = needle + ARRAY_LENGTH_KEY.len;
+                    const subvalue = value[start..];
+                    try config.put("vocab_size", try std.fmt.parseInt(usize, subvalue, 10));
+                } else {
+                    std.log.err("No key named '{s}' found in config", .{ARRAY_LENGTH_KEY});
+                    return error.ConfigKeyNotFound;
+                }
+            }
+        } else |err| switch (err) {
+            error.EndOfStream => {},
+            error.StreamTooLong => return err, // line didn't fit in buf
+            else => return err,
+        }
+
+        if (config.count() != 8) {
+            std.log.err("Invalid or corrupted config, didn't find exactly eight keys", .{});
+            return error.InvalidOrCorruptedConfig;
+        }
+
+        return .{
+            .allocator = allocator,
+            .dim = config.get("dim").?,
+            .hidden_dim = config.get("hidden_dim").?,
+            .n_layers = config.get("n_layers").?,
+            .n_heads = config.get("n_heads").?,
+            .n_kv_heads = config.get("n_kv_heads").?,
+            .seq_len = config.get("seq_len").?,
+            .head_dim = config.get("head_dim").?,
+            .vocab_size = config.get("vocab_size").?,
+        };
+    }
 };
 
 const TransformerWeights = struct {
@@ -299,19 +380,6 @@ const TransformerWeights = struct {
     }
 };
 
-pub fn numCalloc(comptime T: type, allocator: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]T {
-    // constrain to numeric types
-    // TODO: can extend to encompass SIMD types as well?
-    switch (@typeInfo(T)) {
-        .Int, .Float => {},
-        else => @compileError("Type '" ++ @typeName(T) ++ "' must be an integer or float"),
-    }
-
-    const slice = try allocator.alloc(T, n);
-    std.mem.set(T, slice, 0);
-    return slice;
-}
-
 const RunState = struct {
     allocator: std.mem.Allocator,
     // current wave of activations
@@ -329,6 +397,19 @@ const RunState = struct {
     // kv cache
     key_cache: []f32, // (layer, seq_len, dim)
     value_cache: []f32, // (layer, seq_len, dim)
+
+    fn numCalloc(comptime T: type, allocator: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]T {
+        // constrain to numeric types
+        // TODO: can extend to encompass SIMD types as well?
+        switch (@typeInfo(T)) {
+            .Int, .Float => {},
+            else => @compileError("Type '" ++ @typeName(T) ++ "' must be an integer or float"),
+        }
+
+        const slice = try allocator.alloc(T, n);
+        std.mem.set(T, slice, 0);
+        return slice;
+    }
 
     pub fn malloc(allocator: std.mem.Allocator, config: Config) !RunState {
         const att_head_dim = config.n_heads * config.head_dim;
@@ -416,4 +497,12 @@ const Transformer = struct {
 
 pub fn main() void {
     std.debug.print("hello", .{});
+}
+
+test "configLoad" {
+    const allocator = std.testing.allocator;
+
+    const config = try Config.load(allocator, "header.txt");
+
+    std.debug.print("config = {}", .{config});
 }
