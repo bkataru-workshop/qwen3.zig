@@ -230,6 +230,7 @@ const Config = struct {
         defer config.deinit();
 
         while (r.takeDelimiterExclusive('\n')) |line| {
+            // keep tossing the '\n' char until the end (where there isn't one)
             if (r.seek < r.end) r.toss(1);
 
             const cleaned = if (line.len != 0 and line[line.len - 1] == '\r')
